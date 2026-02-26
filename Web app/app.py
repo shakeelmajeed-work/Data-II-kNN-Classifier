@@ -96,7 +96,7 @@ def pixels_to_base64(pixel_array, tint_rgb=None):
         with _sr_lock:  # Thread-safe access to SR model
             try:
                 bgr = cv2.cvtColor(img_array, cv2.COLOR_GRAY2BGR)
-                upscaled = _sr.upsample(bgr)
+                upscaled = _sr.upsample(bgr)                       # 28→112 via EDSR
                 upscaled = cv2.cvtColor(upscaled, cv2.COLOR_BGR2GRAY)
             except cv2.error:
                 upscaled = cv2.resize(img_array, (112, 112), interpolation=cv2.INTER_CUBIC)
@@ -131,8 +131,21 @@ def pixels_to_base64_str(pixel_array, tint_rgb=None):
 df = load_data()
 pixel_cols = [f'pixel_{i}' for i in range(784)]
 
+# Load KNN-predicted data (test set with predicted labels + probability)
+try:
+    df_pred_pixels = pd.read_csv('product_images_for_prediction.csv')
+    df_pred_labels = pd.read_csv('website_predictions.csv')
+    df_predicted = df_pred_pixels.copy()
+    df_predicted['label'] = df_pred_labels['label'].values
+    df_predicted['probability'] = df_pred_labels['probability'].values
+    print(f"Loaded {len(df_predicted)} KNN-predicted products")
+except FileNotFoundError as e:
+    print(f"Warning: prediction files not found ({e}). No predicted products.")
+    df_predicted = pd.DataFrame()
+
 # In-memory cache for served images
 image_cache = {}
+predicted_image_cache = {}
 
 
 def get_image_bytes(idx, tint_rgb=None):
@@ -141,6 +154,14 @@ def get_image_bytes(idx, tint_rgb=None):
     if key not in image_cache:
         image_cache[key] = pixels_to_base64(df.iloc[idx][pixel_cols].values, tint_rgb)
     return image_cache[key]
+
+
+def get_predicted_image_bytes(idx, tint_rgb=None):
+    """Get predicted product image bytes with in-memory caching."""
+    key = (idx, tint_rgb)
+    if key not in predicted_image_cache:
+        predicted_image_cache[key] = pixels_to_base64(df_predicted.iloc[idx][pixel_cols].values, tint_rgb)
+    return predicted_image_cache[key]
 
 
 # Flask route for lazy image loading
@@ -152,6 +173,39 @@ def serve_image(idx, color):
     tint_rgb = COLOR_TINTS.get(color) if color != 'none' else None
     img_bytes = get_image_bytes(idx, tint_rgb)
     return Response(img_bytes, mimetype='image/png')
+
+
+@server.route('/predicted_image/<int:idx>/<color>')
+def serve_predicted_image(idx, color):
+    """Serve KNN-predicted product image on demand."""
+    if len(df_predicted) == 0 or idx < 0 or idx >= len(df_predicted):
+        return Response(status=404)
+    tint_rgb = COLOR_TINTS.get(color) if color != 'none' else None
+    img_bytes = get_predicted_image_bytes(idx, tint_rgb)
+    return Response(img_bytes, mimetype='image/png')
+
+
+@server.route('/mannequin')
+def serve_mannequin():
+    """Serve the mannequin base image."""
+    path = os.path.join(os.path.dirname(__file__), 'WhatsApp Image 2026-02-26 at 10.40.23.jpeg')
+    if not os.path.exists(path):
+        return Response(status=404)
+    with open(path, 'rb') as f:
+        return Response(f.read(), mimetype='image/jpeg')
+
+
+@server.route('/stock/<path:filename>')
+def serve_stock_image(filename):
+    """Serve stock images for the homepage."""
+    stock_dir = os.path.join(os.path.dirname(__file__), 'stock images')
+    path = os.path.join(stock_dir, filename)
+    if not os.path.exists(path):
+        return Response(status=404)
+    ext = filename.rsplit('.', 1)[-1].lower()
+    mime = 'image/jpeg' if ext in ('jpg', 'jpeg') else 'image/png'
+    with open(path, 'rb') as f:
+        return Response(f.read(), mimetype=mime)
 
 
 # ================================
@@ -174,16 +228,16 @@ DUMMY_PRODUCT_NAMES = {
 }
 
 DUMMY_COLORS = {
-    0: [['White', 'Black', 'Gray'], ['Navy', 'Cream'], ['Charcoal', 'White']],
-    1: [['Khaki', 'Navy', 'Black'], ['Cream', 'Gray'], ['Olive', 'Tan']],
-    2: [['Camel', 'Gray', 'Navy'], ['Cream', 'Charcoal'], ['Burgundy', 'Black']],
-    3: [['Black', 'Sage', 'Rust'], ['White', 'Dusty Rose'], ['Navy', 'Burgundy']],
-    4: [['Camel', 'Black', 'Gray'], ['Khaki', 'Navy'], ['Olive', 'Black']],
-    5: [['Tan', 'Black'], ['Nude', 'White'], ['Brown', 'Navy']],
-    6: [['White', 'Light Blue', 'Pink'], ['Ivory', 'Black'], ['Sage', 'Terracotta']],
-    7: [['White', 'Black'], ['Navy', 'Gray'], ['Red', 'White']],
-    8: [['Black', 'Tan', 'Burgundy'], ['Olive', 'Cognac'], ['Navy', 'Brown']],
-    9: [['Black', 'Brown'], ['Tan', 'Gray'], ['Burgundy', 'Black']]
+    0: [['White', 'Navy', 'Pink'], ['Gray', 'Red', 'White'], ['Black', 'Dusty Rose', 'Navy']],            # T-shirt/Top
+    1: [['Black', 'Navy', 'Olive'], ['Charcoal', 'Burgundy', 'Black'], ['Navy', 'Gray', 'Black']],        # Trouser
+    2: [['White', 'Burgundy', 'Gray'], ['Navy', 'Pink', 'White'], ['Red', 'White', 'Charcoal']],          # Pullover
+    3: [['White', 'Red', 'Navy'], ['Pink', 'Black', 'Dusty Rose'], ['Burgundy', 'White', 'Navy']],        # Dress
+    4: [['Navy', 'Red', 'Black'], ['Burgundy', 'Olive', 'Gray'], ['Black', 'Navy', 'Rust']],              # Coat
+    5: [['Red', 'Black', 'Navy'], ['Brown', 'Burgundy', 'White'], ['Navy', 'Red', 'Black']],              # Sandal
+    6: [['White', 'Light Blue', 'Navy'], ['Pink', 'White', 'Gray'], ['Navy', 'White', 'Red']],            # Shirt
+    7: [['Navy', 'Red', 'White'], ['Black', 'Burgundy', 'Gray'], ['Red', 'Navy', 'Black']],               # Sneaker
+    8: [['Black', 'Navy', 'Burgundy'], ['Brown', 'Red', 'Black'], ['Navy', 'Olive', 'Black']],            # Bag
+    9: [['Burgundy', 'Black', 'Navy'], ['Red', 'Brown', 'Navy'], ['Black', 'Burgundy', 'Rust']]           # Ankle Boot
 }
 
 DUMMY_SIZES = {
@@ -212,6 +266,20 @@ PRICE_RANGES = {
     9: (149, 229)
 }
 
+# Fitting room mappings: category -> (fittingRoomType, fittingRoomEmoji)
+FITTING_ROOM_MAP = {
+    0: ('top', '👕'),       # T-shirt/Top
+    1: ('bottom', '👖'),    # Trouser
+    2: ('top', '🧥'),       # Pullover
+    3: ('dress', '👗'),     # Dress (full body)
+    4: ('outerwear', '🧥'), # Coat (layer over top)
+    5: ('shoe', '🩴'),      # Sandal
+    6: ('top', '👔'),       # Shirt
+    7: ('shoe', '👟'),      # Sneaker
+    8: ('accessory', '👜'), # Bag
+    9: ('shoe', '🥾')       # Ankle Boot
+}
+
 
 def generate_products(df, max_products=100):
     products = []
@@ -238,6 +306,9 @@ def generate_products(df, max_products=100):
         # Store primary color for lazy image loading
         primary_color = colors[0] if colors else 'none'
 
+        # Get fitting room type and emoji
+        fitting_type, fitting_emoji = FITTING_ROOM_MAP.get(label, ('accessory', '🛍️'))
+
         products.append({
             'id': f'p{idx}',
             'idx': idx,
@@ -248,13 +319,108 @@ def generate_products(df, max_products=100):
             'reviews': reviews,
             'colors': colors,
             'sizes': sizes,
-            'primary_color': primary_color
+            'primary_color': primary_color,
+            'fittingRoomType': fitting_type,
+            'fittingRoomEmoji': fitting_emoji
         })
 
     return products
 
 
 products = generate_products(df, max_products=20000)
+
+
+# Generate predicted products from KNN-classified test data
+def generate_predicted_products(df_pred, max_products=10000):
+    """Generate product entries from KNN-predicted test data."""
+    if df_pred is None or len(df_pred) == 0:
+        return []
+    predicted = []
+    name_counters = {i: 0 for i in range(10)}
+    num_products = min(len(df_pred), max_products)
+
+    for idx in range(num_products):
+        row = df_pred.iloc[idx]
+        label = int(row['label'])
+
+        names = DUMMY_PRODUCT_NAMES[label]
+        name = names[name_counters[label] % len(names)]
+        name_counters[label] += 1
+
+        min_price, max_price = PRICE_RANGES[label]
+        price = random.randint(min_price, max_price)
+
+        rating = round(random.uniform(3.5, 5.0), 1)
+        reviews = random.randint(10, 200)
+
+        colors = DUMMY_COLORS[label][idx % len(DUMMY_COLORS[label])]
+        primary_color = colors[0] if colors else 'none'
+
+        fitting_type, fitting_emoji = FITTING_ROOM_MAP.get(label, ('accessory', '\U0001f6cd\ufe0f'))
+
+        predicted.append({
+            'id': f'knn{idx}',
+            'idx': idx,
+            'name': f'{name} (KNN) #{idx}',
+            'category': label,
+            'price': price,
+            'rating': rating,
+            'reviews': reviews,
+            'colors': colors,
+            'sizes': DUMMY_SIZES[label],
+            'primary_color': primary_color,
+            'fittingRoomType': fitting_type,
+            'fittingRoomEmoji': fitting_emoji,
+            'isPredicted': True,
+            'probability': float(row.get('probability', 1.0))
+        })
+    return predicted
+
+
+predicted_products = generate_predicted_products(df_predicted, max_products=10000)
+print(f"Generated {len(predicted_products)} predicted product entries")
+
+
+# Flask route for reporting wrong category on predicted products
+@server.route('/report_category', methods=['POST'])
+def report_category():
+    """Update predicted product label when user reports wrong category."""
+    from flask import request
+    try:
+        data = request.get_json()
+        idx = int(data['idx'])
+        new_label = int(data['newLabel'])
+
+        # Update CSV file
+        csv_path = os.path.join(os.path.dirname(__file__), 'website_predictions.csv')
+        df_csv = pd.read_csv(csv_path)
+        if idx < 0 or idx >= len(df_csv):
+            return Response(json.dumps({'error': 'Invalid index'}), status=400, mimetype='application/json')
+
+        df_csv.at[idx, 'label'] = new_label
+        df_csv.at[idx, 'probability'] = 1.0
+        df_csv.to_csv(csv_path, index=False)
+
+        # Update in-memory dataframe
+        df_predicted.at[idx, 'label'] = new_label
+        df_predicted.at[idx, 'probability'] = 1.0
+
+        # Update the product entry in-memory
+        for p in predicted_products:
+            if p['idx'] == idx:
+                p['category'] = new_label
+                p['probability'] = 1.0
+                fitting_type, fitting_emoji = FITTING_ROOM_MAP.get(new_label, ('accessory', '\U0001f6cd\ufe0f'))
+                p['fittingRoomType'] = fitting_type
+                p['fittingRoomEmoji'] = fitting_emoji
+                # Update name
+                names = DUMMY_PRODUCT_NAMES[new_label]
+                p['name'] = f'{names[0]} (KNN) #{idx}'
+                break
+
+        return Response(json.dumps({'success': True, 'idx': idx, 'newLabel': new_label}), mimetype='application/json')
+    except Exception as e:
+        return Response(json.dumps({'error': str(e)}), status=500, mimetype='application/json')
 
 
 def generate_fbt_pairs(products):
@@ -288,6 +454,7 @@ fbt_pairs = generate_fbt_pairs(products)
 
 products_json = json.dumps(products)
 fbt_json = json.dumps(fbt_pairs)
+predicted_products_json = json.dumps(predicted_products)
 
 initial_data = {
     "model_accuracy": "Not Connected Yet",
@@ -305,9 +472,21 @@ HTML_CONTENT_TEMPLATE = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>NUEM - Minimalist Fashion</title>
+<title>Atelié — Refined Fashion</title>
 <script src="https://cdn.tailwindcss.com/3.4.17"></script>
-<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=Playfair+Display:wght@400;500;600&display=swap" rel="stylesheet">
+<script>
+tailwind.config = {
+  theme: {
+    extend: {
+      colors: {
+        brand: { 50: '#faf8f5', 100: '#f3efe8', 200: '#e6ddd0', 300: '#d4c7ad', 400: '#c2ae89', 500: '#b09768', 600: '#9a7d4e', 700: '#7d6340', 800: '#5e4a30', 900: '#3e3120', 950: '#1f1810' },
+        noir: { 50: '#f7f7f6', 100: '#e8e7e4', 200: '#d1cfc9', 300: '#b3b0a7', 400: '#94907f', 500: '#787365', 600: '#5d5a4e', 700: '#4a473e', 800: '#3b3933', 900: '#2d2b26', 950: '#1a1915' }
+      }
+    }
+  }
+}
+</script>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=Playfair+Display:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
   * { font-family: 'Space Grotesk', sans-serif; }
   .font-display { font-family: 'Playfair Display', serif; }
@@ -323,7 +502,7 @@ HTML_CONTENT_TEMPLATE = """<!DOCTYPE html>
   .product-card:hover .quick-actions { opacity: 1; transform: translateY(0); }
   .quick-actions { opacity: 0; transform: translateY(12px); transition: all 0.3s ease; }
   .hero-section {
-    background: linear-gradient(165deg, #0d0d0d 0%, #1c1c1c 40%, #111827 100%);
+    background: url('/stock/banner.jpeg') center/cover no-repeat;
     position: relative;
     overflow: hidden;
   }
@@ -331,52 +510,64 @@ HTML_CONTENT_TEMPLATE = """<!DOCTYPE html>
     content: '';
     position: absolute;
     inset: 0;
-    background: radial-gradient(ellipse at 70% 50%, rgba(120,100,80,0.15) 0%, transparent 60%);
+    background: linear-gradient(135deg, rgba(30,25,15,0.65) 0%, rgba(62,49,32,0.50) 100%);
   }
+  .category-card { position: relative; overflow: hidden; border-radius: 16px; }
+  .category-card img { transition: transform 0.5s ease; width: 100%; height: 100%; object-fit: cover; }
+  .category-card:hover img { transform: scale(1.08); }
+  .category-card .cat-overlay { position: absolute; inset: 0; background: rgba(0,0,0,0.30); display: flex; align-items: center; justify-content: center; transition: background 0.3s ease; }
+  .category-card:hover .cat-overlay { background: rgba(0,0,0,0.45); }
   input:focus { outline: none; }
-  .card-shadow { box-shadow: 0 2px 12px rgba(0,0,0,0.07); }
-  .card-shadow:hover { box-shadow: 0 6px 24px rgba(0,0,0,0.12); }
+  .card-shadow { box-shadow: 0 2px 12px rgba(62,49,32,0.08); }
+  .card-shadow:hover { box-shadow: 0 8px 28px rgba(62,49,32,0.14); }
+  .uncertain-border { box-shadow: 0 0 0 3px #c2ae89, 0 2px 12px rgba(62,49,32,0.08); }
+  .uncertain-border:hover { box-shadow: 0 0 0 3px #c2ae89, 0 8px 28px rgba(62,49,32,0.14); }
+  .scroll-row { display: flex; gap: 1.25rem; overflow-x: auto; padding-bottom: 0.5rem; scroll-behavior: smooth; }
+  .scroll-row::-webkit-scrollbar { height: 4px; }
+  .scroll-row::-webkit-scrollbar-thumb { background: #d4c7ad; border-radius: 2px; }
+  .scroll-row::-webkit-scrollbar-track { background: transparent; }
+  .scroll-card { min-width: 200px; max-width: 200px; flex-shrink: 0; }
+  .report-btn { position: absolute; top: 8px; right: 8px; z-index: 10; width: 28px; height: 28px; border-radius: 50%; background: #c2ae89; display: flex; align-items: center; justify-content: center; cursor: pointer; border: none; opacity: 0.85; transition: opacity 0.2s, transform 0.2s; }
+  .report-btn:hover { opacity: 1; transform: scale(1.1); }
+  .report-modal-bg { position: fixed; inset: 0; background: rgba(30,25,15,0.5); z-index: 1000; display: flex; align-items: center; justify-content: center; }
 </style>
 </head>
 
-<body class="h-full bg-stone-50 text-stone-900">
+<body class="h-full bg-brand-50 text-noir-900">
 <div id="app" class="h-full w-full overflow-auto">
 
 <!-- ===== HEADER ===== -->
-<header class="fixed top-0 left-0 right-0 bg-white/95 backdrop-blur-sm z-50 border-b border-stone-100">
+<header class="fixed top-0 left-0 right-0 bg-white/95 backdrop-blur-sm z-50 border-b border-brand-200/60">
   <div class="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
-    <button onclick="showHome()" class="text-2xl font-display font-semibold tracking-tight hover:opacity-70 transition">NUEM</button>
-    <nav class="hidden md:flex items-center gap-6">
-      <button onclick="showHome()" class="text-sm text-stone-500 hover:text-stone-900 transition font-medium">Home</button>
-      <button onclick="showAllProducts()" class="text-sm text-stone-500 hover:text-stone-900 transition font-medium">Bestseller</button>
-      <div class="relative group">
-        <button class="text-sm text-stone-500 hover:text-stone-900 transition font-medium flex items-center gap-1">Categories <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg></button>
-        <div class="absolute top-full left-0 mt-2 bg-white shadow-xl rounded-xl py-2 min-w-[160px] opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 z-50">
-          <button onclick="filterByCategory(0)" class="block w-full text-left px-4 py-2 text-sm text-stone-600 hover:bg-stone-50 hover:text-stone-900">T-shirt/Top</button>
-          <button onclick="filterByCategory(1)" class="block w-full text-left px-4 py-2 text-sm text-stone-600 hover:bg-stone-50 hover:text-stone-900">Trouser</button>
-          <button onclick="filterByCategory(2)" class="block w-full text-left px-4 py-2 text-sm text-stone-600 hover:bg-stone-50 hover:text-stone-900">Pullover</button>
-          <button onclick="filterByCategory(3)" class="block w-full text-left px-4 py-2 text-sm text-stone-600 hover:bg-stone-50 hover:text-stone-900">Dress</button>
-          <button onclick="filterByCategory(4)" class="block w-full text-left px-4 py-2 text-sm text-stone-600 hover:bg-stone-50 hover:text-stone-900">Coat</button>
-          <button onclick="filterByCategory(5)" class="block w-full text-left px-4 py-2 text-sm text-stone-600 hover:bg-stone-50 hover:text-stone-900">Sandal</button>
-          <button onclick="filterByCategory(6)" class="block w-full text-left px-4 py-2 text-sm text-stone-600 hover:bg-stone-50 hover:text-stone-900">Shirt</button>
-          <button onclick="filterByCategory(7)" class="block w-full text-left px-4 py-2 text-sm text-stone-600 hover:bg-stone-50 hover:text-stone-900">Sneaker</button>
-          <button onclick="filterByCategory(8)" class="block w-full text-left px-4 py-2 text-sm text-stone-600 hover:bg-stone-50 hover:text-stone-900">Bag</button>
-          <button onclick="filterByCategory(9)" class="block w-full text-left px-4 py-2 text-sm text-stone-600 hover:bg-stone-50 hover:text-stone-900">Ankle Boot</button>
-        </div>
-      </div>
+    <button onclick="showHome()" class="text-2xl font-display font-bold tracking-wide text-noir-900 hover:text-brand-600 transition">ATELIÉ</button>
+    <nav class="hidden md:flex items-center gap-4 lg:gap-5">
+      <button onclick="showHome()" class="text-sm text-noir-500 hover:text-brand-700 transition font-medium whitespace-nowrap">Home</button>
+      <button onclick="showAllProducts()" class="text-sm text-noir-500 hover:text-brand-700 transition font-medium whitespace-nowrap">Bestseller</button>
+      <button onclick="showFittingRoom()" class="text-sm text-noir-500 hover:text-brand-700 transition font-medium whitespace-nowrap">Fitting Room</button>
+      <span class="w-px h-4 bg-brand-200"></span>
+      <button onclick="filterByCategory(0)" class="text-xs text-noir-400 hover:text-brand-700 transition font-medium whitespace-nowrap">T-shirt/Top</button>
+      <button onclick="filterByCategory(1)" class="text-xs text-noir-400 hover:text-brand-700 transition font-medium whitespace-nowrap">Trouser</button>
+      <button onclick="filterByCategory(2)" class="text-xs text-noir-400 hover:text-brand-700 transition font-medium whitespace-nowrap">Pullover</button>
+      <button onclick="filterByCategory(3)" class="text-xs text-noir-400 hover:text-brand-700 transition font-medium whitespace-nowrap">Dress</button>
+      <button onclick="filterByCategory(4)" class="text-xs text-noir-400 hover:text-brand-700 transition font-medium whitespace-nowrap">Coat</button>
+      <button onclick="filterByCategory(5)" class="text-xs text-noir-400 hover:text-brand-700 transition font-medium whitespace-nowrap">Sandal</button>
+      <button onclick="filterByCategory(6)" class="text-xs text-noir-400 hover:text-brand-700 transition font-medium whitespace-nowrap">Shirt</button>
+      <button onclick="filterByCategory(7)" class="text-xs text-noir-400 hover:text-brand-700 transition font-medium whitespace-nowrap">Sneaker</button>
+      <button onclick="filterByCategory(8)" class="text-xs text-noir-400 hover:text-brand-700 transition font-medium whitespace-nowrap">Bag</button>
+      <button onclick="filterByCategory(9)" class="text-xs text-noir-400 hover:text-brand-700 transition font-medium whitespace-nowrap">Ankle Boot</button>
     </nav>
     <div class="flex items-center gap-2">
-      <button onclick="showWishlist()" class="relative p-2 hover:bg-stone-100 rounded-full transition">
+      <button onclick="showWishlist()" class="relative p-2 hover:bg-brand-100 rounded-full transition">
         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z"/>
         </svg>
-        <span id="wishlistCount" class="absolute -top-1 -right-1 w-4 h-4 bg-stone-900 text-white text-xs rounded-full items-center justify-center hidden">0</span>
+        <span id="wishlistCount" class="absolute -top-1 -right-1 w-4 h-4 bg-brand-600 text-white text-xs rounded-full items-center justify-center hidden">0</span>
       </button>
-      <button onclick="showCart()" class="relative p-2 hover:bg-stone-100 rounded-full transition">
+      <button onclick="showCart()" class="relative p-2 hover:bg-brand-100 rounded-full transition">
         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M16 11V7a4 4 0 00-8 0v4M5 9h14l1 12H4L5 9z"/>
         </svg>
-        <span id="cartCount" class="absolute -top-1 -right-1 w-4 h-4 bg-stone-900 text-white text-xs rounded-full items-center justify-center hidden">0</span>
+        <span id="cartCount" class="absolute -top-1 -right-1 w-4 h-4 bg-brand-600 text-white text-xs rounded-full items-center justify-center hidden">0</span>
       </button>
     </div>
   </div>
@@ -388,25 +579,26 @@ HTML_CONTENT_TEMPLATE = """<!DOCTYPE html>
   <!-- HOME VIEW -->
   <div id="homeView">
     <!-- Hero -->
-    <section class="hero-section h-[30rem] flex items-center justify-center">
+    <section class="hero-section h-[32rem] flex items-center justify-center">
       <div class="relative text-center px-4 animate-slideUp z-10">
-        <p class="text-stone-400 text-xs tracking-[0.3em] uppercase mb-5">New Collection</p>
-        <h1 class="font-display text-6xl md:text-7xl font-medium mb-5 text-white leading-none">Less is More</h1>
-        <p class="text-stone-400 text-base mb-10 max-w-sm mx-auto">Curated essentials for the modern wardrobe</p>
-        <button onclick="showAllProducts()" class="bg-white text-stone-900 px-10 py-3.5 text-sm tracking-widest font-medium hover:bg-stone-100 transition">SHOP NOW</button>
+        <p class="text-brand-300 text-xs tracking-[0.4em] uppercase mb-5">Spring / Summer 2026</p>
+        <h1 class="font-display text-6xl md:text-7xl font-medium mb-5 text-white leading-none">The Art of Dressing Well</h1>
+        <p class="text-brand-200/80 text-base mb-10 max-w-md mx-auto">Timeless silhouettes crafted for those who appreciate the finer details</p>
+        <button onclick="showAllProducts()" class="bg-brand-500 text-white px-12 py-4 text-sm tracking-[0.2em] font-medium hover:bg-brand-600 transition rounded-sm">EXPLORE COLLECTION</button>
       </div>
     </section>
 
     <!-- Categories -->
     <section class="max-w-7xl mx-auto px-6 py-16">
-      <h2 class="font-display text-2xl mb-8 text-stone-900">Shop by Category</h2>
-      <div id="categoriesGrid" class="grid grid-cols-2 md:grid-cols-5 gap-3"></div>
+      <h2 class="font-display text-2xl mb-8 text-noir-900">Shop by Category</h2>
+      <div id="categoriesGrid" class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4"></div>
     </section>
 
     <!-- New Arrivals -->
     <section class="max-w-7xl mx-auto px-6 pb-16">
-      <h2 class="font-display text-2xl mb-8 text-stone-900">New Arrivals</h2>
+      <h2 class="font-display text-2xl mb-8 text-noir-900">New Arrivals</h2>
       <div id="featuredProducts" class="grid grid-cols-2 md:grid-cols-4 gap-5"></div>
+      <div id="homeFeedIndicator" class="text-center py-8 text-noir-400 text-sm"></div>
     </section>
   </div>
 
@@ -414,7 +606,7 @@ HTML_CONTENT_TEMPLATE = """<!DOCTYPE html>
   <div id="productsView" class="hidden max-w-7xl mx-auto px-6 py-10">
     <div class="flex items-center justify-between mb-8">
       <h2 id="productsTitle" class="font-display text-2xl">All Products</h2>
-      <select id="sortSelect" onchange="sortProducts()" class="border border-stone-200 px-4 py-2 text-sm bg-white rounded-lg focus:border-stone-400 transition">
+      <select id="sortSelect" onchange="sortProducts()" class="border border-brand-200 px-4 py-2 text-sm bg-white rounded-lg focus:border-brand-400 transition">
         <option value="default">Sort by</option>
         <option value="price-low">Price: Low to High</option>
         <option value="price-high">Price: High to Low</option>
@@ -426,7 +618,7 @@ HTML_CONTENT_TEMPLATE = """<!DOCTYPE html>
 
   <!-- PRODUCT DETAIL VIEW -->
   <div id="productDetailView" class="hidden max-w-7xl mx-auto px-6 py-10">
-    <button onclick="goBack()" class="flex items-center gap-2 text-sm text-stone-500 hover:text-stone-900 mb-8 transition">
+    <button onclick="goBack()" class="flex items-center gap-2 text-sm text-noir-500 hover:text-noir-900 mb-8 transition">
       <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/>
       </svg>
@@ -440,7 +632,7 @@ HTML_CONTENT_TEMPLATE = """<!DOCTYPE html>
   <div id="cartView" class="hidden max-w-4xl mx-auto px-6 py-10">
     <h2 class="font-display text-2xl mb-8">Shopping Cart</h2>
     <div id="cartItems" class="space-y-4"></div>
-    <div id="cartSummary" class="mt-8 border-t border-stone-200 pt-8"></div>
+    <div id="cartSummary" class="mt-8 border-t border-brand-200 pt-8"></div>
   </div>
 
   <!-- WISHLIST VIEW -->
@@ -449,18 +641,136 @@ HTML_CONTENT_TEMPLATE = """<!DOCTYPE html>
     <div id="wishlistItems" class="grid grid-cols-2 md:grid-cols-4 gap-5"></div>
   </div>
 
+  <!-- FITTING ROOM VIEW -->
+  <div id="fittingRoomView" class="hidden max-w-6xl mx-auto px-6 py-10">
+    <h2 class="font-display text-2xl mb-2">Virtual Fitting Room 👗</h2>
+    <p class="text-noir-500 text-sm mb-8">Try on items from your cart to see how they look together</p>
+    
+    <div class="flex gap-8 flex-wrap lg:flex-nowrap">
+      <!-- Avatar Panel -->
+      <div class="w-full lg:w-80 flex-shrink-0">
+        <div class="bg-white rounded-2xl border border-brand-200 overflow-hidden p-3">
+          <h3 class="font-semibold text-xs text-noir-500 text-center mb-2 tracking-widest uppercase">Your Outfit</h3>
+
+          <!-- Mannequin with clothing overlays -->
+          <div class="relative w-full select-none" style="aspect-ratio:1/1.05;">
+
+            <!-- Outerwear: wide zone covering torso + arms -->
+            <div id="overlay-outerwear" class="absolute hidden" style="left:13%;top:23%;width:74%;height:38%;pointer-events:none;">
+              <img id="overlay-outerwear-img" src="" alt="" class="w-full h-full object-contain" style="mix-blend-mode:multiply;">
+            </div>
+
+            <!-- Top (shirt/pullover): torso only -->
+            <div id="overlay-top" class="absolute hidden" style="left:27%;top:26%;width:46%;height:31%;pointer-events:none;">
+              <img id="overlay-top-img" src="" alt="" class="w-full h-full object-contain" style="mix-blend-mode:multiply;">
+            </div>
+
+            <!-- Dress: torso + full legs (replaces top + bottom) -->
+            <div id="overlay-dress" class="absolute hidden" style="left:27%;top:26%;width:46%;height:67%;pointer-events:none;">
+              <img id="overlay-dress-img" src="" alt="" class="w-full h-full object-contain" style="mix-blend-mode:multiply;">
+            </div>
+
+            <!-- Bottom (trousers): waist to ankles -->
+            <div id="overlay-bottom" class="absolute hidden" style="left:29%;top:55%;width:42%;height:38%;pointer-events:none;">
+              <img id="overlay-bottom-img" src="" alt="" class="w-full h-full object-contain" style="mix-blend-mode:multiply;">
+            </div>
+
+            <!-- Left shoe: overlapping pair, centred under trousers -->
+            <div id="overlay-shoe-left" class="absolute hidden" style="left:35%;top:91%;width:18%;height:8%;pointer-events:none;">
+              <img id="overlay-shoe-left-img" src="" alt="" class="w-full h-full object-contain" style="mix-blend-mode:multiply;">
+            </div>
+
+            <!-- Right shoe: overlaps left by ~6%, mirrored -->
+            <div id="overlay-shoe-right" class="absolute hidden" style="left:47%;top:91%;width:18%;height:8%;pointer-events:none;">
+              <img id="overlay-shoe-right-img" src="" alt="" class="w-full h-full object-contain" style="mix-blend-mode:multiply;transform:scaleX(-1);">
+            </div>
+
+            <!-- Bag: below the right hand -->
+            <div id="overlay-accessory" class="absolute hidden" style="left:67%;top:51%;width:20%;height:20%;pointer-events:none;">
+              <img id="overlay-accessory-img" src="" alt="" class="w-full h-full object-contain" style="mix-blend-mode:multiply;">
+            </div>
+
+          </div>
+
+          <div id="outfitLabels" class="mt-2 text-center text-xs text-noir-500"></div>
+        </div>
+
+        <div class="mt-4 space-y-3">
+          <div id="outfitTotal" class="text-xl font-bold text-amber-600 text-center">Total: £0</div>
+          <button onclick="clearFittingRoom()" class="w-full py-3 border border-brand-200 rounded-xl text-sm font-medium hover:bg-brand-50 transition">Clear All</button>
+          <button onclick="saveFittingRoomOutfit()" class="w-full py-3 bg-noir-900 text-white rounded-xl text-sm font-medium hover:bg-noir-800 transition">💾 Save Outfit</button>
+        </div>
+      </div>
+      
+      <!-- Items from Cart -->
+      <div class="flex-1 min-w-0">
+        <div id="fittingRoomEmpty" class="hidden text-center py-16">
+          <div class="text-6xl mb-5">🛒</div>
+          <p class="text-noir-400 mb-4 text-lg">Your cart is empty</p>
+          <p class="text-noir-400 text-sm mb-6">Add items to your cart to try them on here</p>
+          <button onclick="showAllProducts()" class="bg-noir-900 text-white px-8 py-3 rounded-xl text-sm font-medium hover:bg-noir-800 transition">Browse Products</button>
+        </div>
+        
+        <div id="fittingRoomItems">
+          <!-- Tops -->
+          <div id="fr-tops-section" class="mb-8">
+            <h3 class="font-semibold text-lg mb-4">👕 Tops</h3>
+            <div id="fr-tops" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3"></div>
+          </div>
+          
+          <!-- Dresses -->
+          <div id="fr-dress-section" class="mb-8">
+            <h3 class="font-semibold text-lg mb-4">👗 Dresses</h3>
+            <div id="fr-dress" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3"></div>
+          </div>
+          
+          <!-- Outerwear -->
+          <div id="fr-outerwear-section" class="mb-8">
+            <h3 class="font-semibold text-lg mb-4">🧥 Outerwear</h3>
+            <div id="fr-outerwear" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3"></div>
+          </div>
+          
+          <!-- Bottoms -->
+          <div id="fr-bottoms-section" class="mb-8">
+            <h3 class="font-semibold text-lg mb-4">👖 Bottoms</h3>
+            <div id="fr-bottoms" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3"></div>
+          </div>
+          
+          <!-- Shoes -->
+          <div id="fr-shoes-section" class="mb-8">
+            <h3 class="font-semibold text-lg mb-4">👟 Shoes</h3>
+            <div id="fr-shoes" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3"></div>
+          </div>
+          
+          <!-- Accessories -->
+          <div id="fr-accessories-section" class="mb-8">
+            <h3 class="font-semibold text-lg mb-4">👜 Accessories</h3>
+            <div id="fr-accessories" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3"></div>
+          </div>
+        </div>
+        
+        <!-- Saved Outfits -->
+        <div class="mt-10 pt-8 border-t border-brand-200">
+          <h3 class="font-semibold text-lg mb-4">✨ Saved Outfits</h3>
+          <div id="savedOutfitsGrid" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3"></div>
+          <p id="noSavedOutfits" class="text-noir-400 text-sm text-center py-8">No saved outfits yet. Create one!</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- ORDER CONFIRMATION VIEW -->
   <div id="confirmationView" class="hidden max-w-xl mx-auto px-6 py-20 text-center">
-    <div class="w-20 h-20 bg-stone-900 rounded-full flex items-center justify-center mx-auto mb-8">
+    <div class="w-20 h-20 bg-noir-900 rounded-full flex items-center justify-center mx-auto mb-8">
       <svg class="w-10 h-10 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/>
       </svg>
     </div>
     <h1 class="font-display text-4xl font-medium mb-4">Order Confirmed</h1>
-    <p class="text-stone-500 mb-2">Thank you for shopping with NUEM.</p>
-    <p class="text-stone-500 mb-8">A confirmation email has been sent to your inbox.</p>
+    <p class="text-noir-500 mb-2">Thank you for shopping with Atelié.</p>
+    <p class="text-noir-500 mb-8">A confirmation email has been sent to your inbox.</p>
     <p class="text-3xl font-semibold mb-10" id="confirmationTotal"></p>
-    <button onclick="continueShopping()" class="bg-stone-900 text-white px-10 py-4 text-sm tracking-widest font-medium hover:bg-stone-800 transition">
+    <button onclick="continueShopping()" class="bg-noir-900 text-white px-10 py-4 text-sm tracking-widest font-medium hover:bg-noir-800 transition">
       CONTINUE SHOPPING
     </button>
   </div>
@@ -472,55 +782,55 @@ HTML_CONTENT_TEMPLATE = """<!DOCTYPE html>
   <div class="bg-white max-w-md w-full rounded-2xl p-8 animate-fadeIn" id="paymentModalInner">
     <div class="flex items-center justify-between mb-6">
       <h2 class="font-display text-2xl">Payment Details</h2>
-      <button onclick="closePaymentModal()" class="text-stone-400 hover:text-stone-900 transition">
+      <button onclick="closePaymentModal()" class="text-noir-400 hover:text-noir-900 transition">
         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
         </svg>
       </button>
     </div>
 
-    <div id="paymentSummary" class="bg-stone-50 rounded-xl p-4 mb-6">
-      <div class="flex justify-between text-sm text-stone-500 mb-1">
+    <div id="paymentSummary" class="bg-brand-50 rounded-xl p-4 mb-6">
+      <div class="flex justify-between text-sm text-noir-500 mb-1">
         <span>Subtotal</span><span id="modalSubtotal"></span>
       </div>
-      <div class="flex justify-between text-sm text-stone-500 mb-2">
+      <div class="flex justify-between text-sm text-noir-500 mb-2">
         <span>Shipping</span><span id="modalShipping"></span>
       </div>
-      <div class="flex justify-between font-semibold text-lg pt-2 border-t border-stone-200">
+      <div class="flex justify-between font-semibold text-lg pt-2 border-t border-brand-200">
         <span>Total</span><span id="modalTotal"></span>
       </div>
     </div>
 
     <div class="space-y-4">
       <div>
-        <label class="block text-xs font-medium text-stone-600 mb-1.5 tracking-wide uppercase">Cardholder Name</label>
-        <input type="text" id="cardName" placeholder="Jane Smith" class="w-full border border-stone-200 rounded-xl px-4 py-3 text-sm hover:border-stone-400 focus:border-stone-900 transition">
+        <label class="block text-xs font-medium text-noir-600 mb-1.5 tracking-wide uppercase">Cardholder Name</label>
+        <input type="text" id="cardName" placeholder="Jane Smith" class="w-full border border-brand-200 rounded-xl px-4 py-3 text-sm hover:border-noir-400 focus:border-noir-900 transition">
       </div>
       <div>
-        <label class="block text-xs font-medium text-stone-600 mb-1.5 tracking-wide uppercase">Card Number</label>
-        <input type="text" id="cardNumber" placeholder="1234 5678 9012 3456" maxlength="19" oninput="formatCardNumber(this)" class="w-full border border-stone-200 rounded-xl px-4 py-3 text-sm hover:border-stone-400 focus:border-stone-900 transition">
+        <label class="block text-xs font-medium text-noir-600 mb-1.5 tracking-wide uppercase">Card Number</label>
+        <input type="text" id="cardNumber" placeholder="1234 5678 9012 3456" maxlength="19" oninput="formatCardNumber(this)" class="w-full border border-brand-200 rounded-xl px-4 py-3 text-sm hover:border-noir-400 focus:border-noir-900 transition">
       </div>
       <div class="grid grid-cols-2 gap-4">
         <div>
-          <label class="block text-xs font-medium text-stone-600 mb-1.5 tracking-wide uppercase">Expiry</label>
-          <input type="text" id="cardExpiry" placeholder="MM / YY" maxlength="7" oninput="formatExpiry(this)" class="w-full border border-stone-200 rounded-xl px-4 py-3 text-sm hover:border-stone-400 focus:border-stone-900 transition">
+          <label class="block text-xs font-medium text-noir-600 mb-1.5 tracking-wide uppercase">Expiry</label>
+          <input type="text" id="cardExpiry" placeholder="MM / YY" maxlength="7" oninput="formatExpiry(this)" class="w-full border border-brand-200 rounded-xl px-4 py-3 text-sm hover:border-noir-400 focus:border-noir-900 transition">
         </div>
         <div>
-          <label class="block text-xs font-medium text-stone-600 mb-1.5 tracking-wide uppercase">CVV</label>
-          <input type="text" id="cardCvv" placeholder="123" maxlength="4" class="w-full border border-stone-200 rounded-xl px-4 py-3 text-sm hover:border-stone-400 focus:border-stone-900 transition">
+          <label class="block text-xs font-medium text-noir-600 mb-1.5 tracking-wide uppercase">CVV</label>
+          <input type="text" id="cardCvv" placeholder="123" maxlength="4" class="w-full border border-brand-200 rounded-xl px-4 py-3 text-sm hover:border-noir-400 focus:border-noir-900 transition">
         </div>
       </div>
     </div>
 
-    <button onclick="processPayment()" class="w-full bg-stone-900 text-white py-4 rounded-xl font-medium text-sm tracking-widest mt-6 hover:bg-stone-800 transition">
+    <button onclick="processPayment()" class="w-full bg-noir-900 text-white py-4 rounded-xl font-medium text-sm tracking-widest mt-6 hover:bg-noir-800 transition">
       PAY NOW
     </button>
-    <p class="text-xs text-stone-400 text-center mt-4">Your payment is simulated — no real charge is made.</p>
+    <p class="text-xs text-noir-400 text-center mt-4">Your payment is simulated — no real charge is made.</p>
   </div>
 </div>
 
 <!-- ===== TOAST ===== -->
-<div id="toast" class="fixed bottom-6 left-1/2 -translate-x-1/2 bg-stone-900 text-white px-6 py-3 rounded-full shadow-xl transform translate-y-20 opacity-0 transition-all duration-300 z-50 text-sm font-medium">
+<div id="toast" class="fixed bottom-6 left-1/2 -translate-x-1/2 bg-noir-900 text-white px-6 py-3 rounded-full shadow-xl transform translate-y-20 opacity-0 transition-all duration-300 z-50 text-sm font-medium">
   <span id="toastMessage"></span>
 </div>
 
@@ -537,18 +847,25 @@ HTML_CONTENT_TEMPLATE = """<!DOCTYPE html>
 // ===== DATA =====
 const products = __PRODUCTS_JSON__;
 const frequentlyBoughtTogether = __FBT_JSON__;
+const predictedProducts = __PREDICTED_JSON__;
+
+// Helper: find product from either main or predicted list
+const allProducts = [...products, ...predictedProducts];
+function findProduct(id) {
+  return allProducts.find(p => p.id === id);
+}
 
 const categories = [
-  { id: 0, name: 'T-shirt/Top', icon: '👕' },
-  { id: 1, name: 'Trouser',     icon: '👖' },
-  { id: 2, name: 'Pullover',    icon: '🧥' },
-  { id: 3, name: 'Dress',       icon: '👗' },
-  { id: 4, name: 'Coat',        icon: '🧥' },
-  { id: 5, name: 'Sandal',      icon: '🩴' },
-  { id: 6, name: 'Shirt',       icon: '👔' },
-  { id: 7, name: 'Sneaker',     icon: '👟' },
-  { id: 8, name: 'Bag',         icon: '👜' },
-  { id: 9, name: 'Ankle Boot',  icon: '🥾' }
+  { id: 0, name: 'T-shirt/Top', icon: '👕', image: '/stock/t%20shirt.jpeg' },
+  { id: 1, name: 'Trouser',     icon: '👖', image: '/stock/trouser.jpeg' },
+  { id: 2, name: 'Pullover',    icon: '🧥', image: '/stock/pullover.jpeg' },
+  { id: 3, name: 'Dress',       icon: '👗', image: '/stock/dress.jpeg' },
+  { id: 4, name: 'Coat',        icon: '🧥', image: '/stock/coat.jpeg' },
+  { id: 5, name: 'Sandal',      icon: '🩴', image: '/stock/sandals.jpeg' },
+  { id: 6, name: 'Shirt',       icon: '👔', image: '/stock/shirt.jpeg' },
+  { id: 7, name: 'Sneaker',     icon: '👟', image: '/stock/sneakers.jpeg' },
+  { id: 8, name: 'Bag',         icon: '👜', image: '/stock/bag.jpeg' },
+  { id: 9, name: 'Ankle Boot',  icon: '🥾', image: '/stock/ankle%20boots.jpeg' }
 ];
 
 // ===== STATE =====
@@ -563,13 +880,19 @@ let currentProductList = [];
 let isLoading = false;
 const PRODUCTS_PER_LOAD = 20;
 
+// Fitting room state
+let fittingRoomOutfit = { top: null, bottom: null, shoe: null, accessory: null, dress: null, outerwear: null };
+let savedOutfits = [];
+
 // ===== STORAGE =====
-function saveCart()     { try { localStorage.setItem('nuem_cart',     JSON.stringify(cart));     } catch(e) {} }
-function saveWishlist() { try { localStorage.setItem('nuem_wishlist', JSON.stringify(wishlist)); } catch(e) {} }
+function saveCart()     { try { localStorage.setItem('atelie_cart',     JSON.stringify(cart));     } catch(e) {} }
+function saveWishlist() { try { localStorage.setItem('atelie_wishlist', JSON.stringify(wishlist)); } catch(e) {} }
+function saveSavedOutfits() { try { localStorage.setItem('atelie_saved_outfits', JSON.stringify(savedOutfits)); } catch(e) {} }
 function loadStorage() {
   try {
-    const c = localStorage.getItem('nuem_cart');     if (c) cart     = JSON.parse(c);
-    const w = localStorage.getItem('nuem_wishlist'); if (w) wishlist = JSON.parse(w);
+    const c = localStorage.getItem('atelie_cart');     if (c) cart     = JSON.parse(c);
+    const w = localStorage.getItem('atelie_wishlist'); if (w) wishlist = JSON.parse(w);
+    const o = localStorage.getItem('atelie_saved_outfits'); if (o) savedOutfits = JSON.parse(o);
   } catch(e) {}
 }
 
@@ -578,6 +901,7 @@ function showHome() {
   hideAllViews();
   document.getElementById('homeView').classList.remove('hidden');
   currentView = 'home';
+  document.getElementById('app').scrollTo({ top: 0, behavior: 'instant' });
 }
 
 function showAllProducts() {
@@ -589,6 +913,7 @@ function showAllProducts() {
   currentProductList = [...products];
   displayedProductCount = PRODUCTS_PER_LOAD;
   renderProducts(currentProductList.slice(0, displayedProductCount), true);
+  document.getElementById('app').scrollTo({ top: 0, behavior: 'instant' });
 }
 
 function filterByCategory(categoryId) {
@@ -606,6 +931,7 @@ function filterByCategory(categoryId) {
   }
   displayedProductCount = PRODUCTS_PER_LOAD;
   renderProducts(currentProductList.slice(0, displayedProductCount), true);
+  document.getElementById('app').scrollTo({ top: 0, behavior: 'instant' });
 }
 
 function showProductDetail(productId) {
@@ -613,7 +939,7 @@ function showProductDetail(productId) {
   hideAllViews();
   document.getElementById('productDetailView').classList.remove('hidden');
   currentView = 'productDetail';
-  currentProduct = products.find(p => p.id === productId);
+  currentProduct = products.find(p => p.id === productId) || predictedProducts.find(p => p.id === productId);
   renderProductDetail(currentProduct);
   renderRecommendations(currentProduct);
   document.getElementById('app').scrollTo({ top: 0, behavior: 'instant' });
@@ -625,6 +951,151 @@ function showCart() {
   document.getElementById('cartView').classList.remove('hidden');
   currentView = 'cart';
   renderCart();
+  document.getElementById('app').scrollTo({ top: 0, behavior: 'instant' });
+}
+
+// ===== SIZE GUIDE =====
+const sizeGuideData = {
+  clothing: {
+    unit: 'cm',
+    headers: ['Size', 'Chest', 'Length', 'Shoulder', 'Sleeve'],
+    rows: [['XS','86','64','40','59'],['S','92','66','42','61'],['M','98','68','44','63'],['L','104','70','46','65'],['XL','110','72','48','67']]
+  },
+  trousers: {
+    unit: 'cm',
+    headers: ['Size', 'Waist', 'Hip Width', 'Thigh', 'Rise', 'Inseam'],
+    rows: [['28','71','93','30','25','76'],['30','76','98','32','26','78'],['32','81','103','33','27','80'],['34','86','108','35','28','80'],['36','91','113','36','28','82']]
+  },
+  footwear: {
+    unit: 'cm',
+    headers: ['EU Size', 'UK Size', 'Foot Length', 'Foot Width'],
+    rows: [['36','3.5','22.5','8.5'],['37','4','23.0','8.7'],['38','5','23.5','8.9'],['39','6','24.5','9.1'],['40','6.5','25.0','9.3'],['41','7.5','25.5','9.5'],['42','8','26.5','9.7'],['43','9','27.0','9.9'],['44','9.5','27.5','10.1']]
+  },
+  dress: {
+    unit: 'cm',
+    headers: ['Size', 'Bust', 'Waist', 'Hip', 'Length'],
+    rows: [['XS','82','64','88','90'],['S','86','68','92','92'],['M','90','72','96','94'],['L','94','76','100','96']]
+  },
+  onesize: {
+    unit: 'cm',
+    headers: ['Size', 'Width', 'Height', 'Depth', 'Strap Drop'],
+    rows: [['One Size','35','28','12','55']]
+  }
+};
+
+function getCategoryGuide(categoryId) {
+  const map = {0:'clothing',1:'trousers',2:'clothing',3:'dress',4:'clothing',5:'footwear',6:'clothing',7:'footwear',8:'onesize',9:'footwear'};
+  return sizeGuideData[map[categoryId]] || sizeGuideData.clothing;
+}
+
+function openSizeGuide(categoryId) {
+  const guide = getCategoryGuide(categoryId);
+  const catName = categories.find(c => c.id === categoryId)?.name || '';
+  var thCells = guide.headers.map(function(h){ return '<th class="py-3 px-2 text-left font-semibold text-noir-800 text-xs uppercase tracking-wide">' + h + '</th>'; }).join('');
+  var bodyRows = guide.rows.map(function(row, ri){
+    var cls = ri % 2 === 0 ? ' class="bg-brand-50/50"' : '';
+    var cells = row.map(function(cell, ci){ return '<td class="py-3 px-2 ' + (ci === 0 ? 'font-semibold text-noir-800' : 'text-noir-600') + '">' + cell + '</td>'; }).join('');
+    return '<tr' + cls + '>' + cells + '</tr>';
+  }).join('');
+
+  var html = '<div class="bg-white rounded-2xl w-full max-w-lg mx-4 animate-slideUp max-h-[85vh] flex flex-col">'
+    + '<div class="flex items-center justify-between p-6 pb-4 border-b border-brand-100">'
+    + '<div><h3 class="font-display text-xl font-medium">Size Guide</h3>'
+    + '<p class="text-xs text-noir-400 mt-1">' + catName + ' — Measurements in ' + guide.unit + '</p></div>'
+    + '<button onclick="closeSizeGuide()" class="w-8 h-8 flex items-center justify-center rounded-full hover:bg-brand-100 transition text-noir-400 hover:text-noir-800">'
+    + '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg></button></div>'
+    + '<div class="overflow-auto p-6 pt-4">'
+    + '<table class="w-full text-sm"><thead><tr class="border-b-2 border-noir-900">' + thCells + '</tr></thead>'
+    + '<tbody>' + bodyRows + '</tbody></table>'
+    + '<p class="text-xs text-noir-400 mt-4">Measurements are approximate and may vary slightly. When between sizes, we recommend sizing up for a relaxed fit.</p>'
+    + '</div></div>';
+
+  var modal = document.createElement('div');
+  modal.id = 'sizeGuideModal';
+  modal.className = 'report-modal-bg';
+  modal.onclick = function(e){ if(e.target === modal) closeSizeGuide(); };
+  modal.innerHTML = html;
+  document.body.appendChild(modal);
+}
+
+function closeSizeGuide() {
+  var modal = document.getElementById('sizeGuideModal');
+  if (modal) modal.remove();
+}
+
+// ===== REPORT WRONG CATEGORY =====
+let reportingProductId = null;
+
+function openReportModal(productId) {
+  reportingProductId = productId;
+  const product = findProduct(productId);
+  if (!product) return;
+  const currentCat = categories.find(c => c.id === product.category);
+
+  const modal = document.createElement('div');
+  modal.id = 'reportModal';
+  modal.className = 'report-modal-bg';
+  modal.onclick = (e) => { if (e.target === modal) closeReportModal(); };
+  modal.innerHTML = `
+    <div class="bg-white rounded-2xl p-6 w-full max-w-sm mx-4 animate-slideUp">
+      <h3 class="font-display text-lg mb-1">Report Wrong Category</h3>
+      <p class="text-xs text-noir-400 mb-4">Current: <strong>${currentCat ? currentCat.name : 'Unknown'}</strong> (${Math.round(product.probability * 100)}% confidence)</p>
+      <p class="text-sm text-noir-600 mb-3">Select the correct category:</p>
+      <div class="grid grid-cols-2 gap-2 mb-5">
+        ${categories.filter(c => c.id !== product.category).map(c => `
+          <button onclick="submitReport(${c.id})"
+            class="text-left px-3 py-2.5 rounded-lg border border-brand-200 hover:border-noir-400 hover:bg-brand-50 transition text-sm">
+            ${c.name}
+          </button>
+        `).join('')}
+      </div>
+      <button onclick="closeReportModal()" class="w-full text-center text-sm text-noir-400 hover:text-brand-600 transition">Cancel</button>
+    </div>
+  `;
+  document.body.appendChild(modal);
+}
+
+function closeReportModal() {
+  const modal = document.getElementById('reportModal');
+  if (modal) modal.remove();
+  reportingProductId = null;
+}
+
+async function submitReport(newLabel) {
+  const product = findProduct(reportingProductId);
+  if (!product) return;
+  const idx = product.idx;
+
+  closeReportModal();
+
+  try {
+    const res = await fetch('/report_category', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ idx, newLabel })
+    });
+    const data = await res.json();
+    if (data.success) {
+      // Update local product data
+      product.category = newLabel;
+      product.probability = 1.0;
+      const cat = categories.find(c => c.id === newLabel);
+      product.name = product.name.replace(/^.*\\(KNN\\)/, (cat ? cat.name : 'Item') + ' (KNN)');
+
+      // Show success feedback
+      showToast('Category updated — thank you for the correction!');
+
+      // Re-render if still on product detail
+      if (currentView === 'productDetail' && currentProduct) {
+        renderProductDetail(currentProduct);
+        renderRecommendations(currentProduct);
+      }
+    } else {
+      showToast('Error: ' + (data.error || 'Unknown error'));
+    }
+  } catch (e) {
+    showToast('Network error — please try again');
+  }
 }
 
 function showWishlist() {
@@ -633,6 +1104,7 @@ function showWishlist() {
   document.getElementById('wishlistView').classList.remove('hidden');
   currentView = 'wishlist';
   renderWishlist();
+  document.getElementById('app').scrollTo({ top: 0, behavior: 'instant' });
 }
 
 function goBack() {
@@ -643,11 +1115,12 @@ function goBack() {
   }
   else if (previousView === 'cart') showCart();
   else if (previousView === 'wishlist') showWishlist();
+  else if (previousView === 'fittingRoom') showFittingRoom();
   else showHome();
 }
 
 function hideAllViews() {
-  ['homeView','productsView','productDetailView','cartView','wishlistView','confirmationView']
+  ['homeView','productsView','productDetailView','cartView','wishlistView','confirmationView','fittingRoomView']
     .forEach(id => document.getElementById(id).classList.add('hidden'));
 }
 
@@ -661,17 +1134,42 @@ function renderCategories() {
   const grid = document.getElementById('categoriesGrid');
   grid.innerHTML = categories.map(cat => `
     <button onclick="filterByCategory(${cat.id})"
-      class="bg-white p-5 rounded-xl hover:shadow-md transition group text-center card-shadow">
-      <div class="text-3xl mb-2 group-hover:scale-110 transition">${cat.icon}</div>
-      <div class="text-xs font-medium text-stone-700">${cat.name}</div>
+      class="category-card aspect-[3/4] card-shadow">
+      <img src="${cat.image}" alt="${cat.name}" loading="lazy">
+      <div class="cat-overlay">
+        <span class="text-white text-sm md:text-base font-semibold tracking-wide drop-shadow-lg">${cat.name}</span>
+      </div>
     </button>
   `).join('');
 }
 
+let homeFeedPool = [];
+let homeFeedLoaded = 0;
+const HOME_FEED_BATCH = 8;
+
 function renderFeaturedProducts() {
+  // Build a shuffled pool of all products for the home feed
+  homeFeedPool = [...allProducts].sort(() => Math.random() - 0.5);
+  homeFeedLoaded = 0;
   const container = document.getElementById('featuredProducts');
-  const featured = products.filter(p => p.rating >= 4.5).slice(0, 8);
-  container.innerHTML = featured.map(p => createProductCard(p)).join('');
+  container.innerHTML = '';
+  loadMoreHomeFeed();
+}
+
+function loadMoreHomeFeed() {
+  const container = document.getElementById('featuredProducts');
+  const next = homeFeedPool.slice(homeFeedLoaded, homeFeedLoaded + HOME_FEED_BATCH);
+  if (next.length === 0) return;
+  container.innerHTML += next.map(p => createProductCard(p)).join('');
+  homeFeedLoaded += next.length;
+  const indicator = document.getElementById('homeFeedIndicator');
+  if (indicator) {
+    if (homeFeedLoaded >= homeFeedPool.length) {
+      indicator.innerHTML = `<span class="text-noir-300">All ${homeFeedPool.length} products shown</span>`;
+    } else {
+      indicator.innerHTML = `<span>Showing ${homeFeedLoaded} of ${homeFeedPool.length} products</span><br><span class="text-xs">Scroll down for more</span>`;
+    }
+  }
 }
 
 function renderProducts(productList, reset = false) {
@@ -699,11 +1197,11 @@ function updateLoadMoreIndicator() {
   if (!indicator) {
     indicator = document.createElement('div');
     indicator.id = 'loadMoreIndicator';
-    indicator.className = 'text-center py-8 text-stone-400 text-sm';
+    indicator.className = 'text-center py-8 text-noir-400 text-sm';
     container.appendChild(indicator);
   }
   if (displayedProductCount >= currentProductList.length) {
-    indicator.innerHTML = `<span class="text-stone-300">All ${currentProductList.length} products shown</span>`;
+    indicator.innerHTML = `<span class="text-noir-300">All ${currentProductList.length} products shown</span>`;
   } else {
     indicator.innerHTML = `<span>Showing ${displayedProductCount} of ${currentProductList.length} products</span><br><span class="text-xs">Scroll down for more</span>`;
   }
@@ -721,24 +1219,33 @@ function renderStars(rating) {
 }
 
 function getImageUrl(product) {
+  if (product.isPredicted) {
+    return `/predicted_image/${product.idx}/${product.primary_color || 'none'}`;
+  }
   return `/image/${product.idx}/${product.primary_color || 'none'}`;
 }
 
-function createProductCard(product) {
+function createProductCard(product, isScrollCard = false) {
   const isWishlisted = wishlist.some(w => w.product_id === product.id);
   const imageUrl = getImageUrl(product);
+  const isUncertain = product.isPredicted && product.probability !== undefined && product.probability < 1.0;
+  const shadowClass = isUncertain ? 'uncertain-border' : 'card-shadow';
+  const scrollClass = isScrollCard ? 'scroll-card' : '';
 
   return `
-    <div class="product-card group cursor-pointer" onclick="showProductDetail('${product.id}')">
-      <div class="relative aspect-square rounded-2xl overflow-hidden mb-3 bg-stone-100 card-shadow">
+    <div class="product-card group cursor-pointer ${scrollClass}" onclick="showProductDetail('${product.id}')">
+      <div class="relative aspect-square rounded-2xl overflow-hidden mb-3 bg-brand-100 ${shadowClass}">
+        ${isUncertain ? `<button onclick="event.stopPropagation(); openReportModal('${product.id}')" class="report-btn" title="Report wrong category">
+          <svg class="w-4 h-4 text-noir-800" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M3 12a9 9 0 1118 0 9 9 0 01-18 0z"/></svg>
+        </button>` : ''}
         <img src="${imageUrl}" loading="lazy" class="product-image w-full h-full object-contain transition duration-500" alt="${product.name}">
         <div class="quick-actions absolute bottom-0 left-0 right-0 p-3 flex gap-2 bg-gradient-to-t from-black/20 to-transparent">
           <button onclick="event.stopPropagation(); addToCart('${product.id}')"
-            class="flex-1 bg-stone-900 text-white py-2 text-xs rounded-lg hover:bg-stone-700 transition font-medium">
+            class="flex-1 bg-noir-900 text-white py-2 text-xs rounded-lg hover:bg-noir-700 transition font-medium">
             Add to Cart
           </button>
           <button onclick="event.stopPropagation(); toggleWishlist('${product.id}')"
-            class="w-9 h-9 flex items-center justify-center bg-white rounded-lg hover:bg-stone-100 transition ${isWishlisted ? 'text-red-500' : 'text-stone-400'}">
+            class="w-9 h-9 flex items-center justify-center bg-white rounded-lg hover:bg-brand-100 transition ${isWishlisted ? 'text-brand-600' : 'text-noir-400'}">
             <svg class="w-4 h-4" fill="${isWishlisted ? 'currentColor' : 'none'}" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
                 d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z"/>
@@ -746,12 +1253,12 @@ function createProductCard(product) {
           </button>
         </div>
       </div>
-      <h3 class="text-sm font-medium mb-1 text-stone-800">${product.name}</h3>
+      <h3 class="text-sm font-medium mb-1 text-noir-800 ${isScrollCard ? 'truncate' : ''}">${product.name}</h3>
       <div class="flex items-center gap-1.5 mb-1">
         <div class="flex items-center text-amber-500">${renderStars(product.rating)}</div>
-        <span class="text-xs text-stone-400">(${product.reviews})</span>
+        <span class="text-xs text-noir-400">(${product.reviews})</span>
       </div>
-      <p class="font-semibold text-stone-900">£${product.price}</p>
+      <p class="font-semibold text-noir-900">£${product.price}</p>
     </div>
   `;
 }
@@ -762,24 +1269,36 @@ function renderProductDetail(product) {
   const imageUrl = getImageUrl(product);
 
   document.getElementById('productDetail').innerHTML = `
-    <div class="aspect-square rounded-2xl overflow-hidden bg-stone-100"><img src="${imageUrl}" class="w-full h-full object-contain" alt="${product.name}"></div>
+    <div class="aspect-square rounded-2xl overflow-hidden bg-brand-100"><img src="${imageUrl}" class="w-full h-full object-contain" alt="${product.name}"></div>
     <div class="space-y-6">
       <div>
-        <p class="text-xs text-stone-400 mb-2 tracking-wide uppercase">${category.name}</p>
+        <p class="text-xs text-noir-400 mb-2 tracking-wide uppercase">${category.name}</p>
         <h1 class="text-3xl font-display font-medium mb-3">${product.name}</h1>
         <div class="flex items-center gap-3 mb-5">
           <div class="flex items-center text-amber-500">${renderStars(product.rating)}</div>
-          <span class="text-sm text-stone-400">${product.rating} · ${product.reviews} reviews</span>
+          <span class="text-sm text-noir-400">${product.rating} · ${product.reviews} reviews</span>
         </div>
         <p class="text-3xl font-semibold">£${product.price}</p>
       </div>
 
+      ${product.isPredicted && product.probability !== undefined && product.probability < 1.0 ? `
+      <div class="flex items-start gap-3 p-4 rounded-xl bg-amber-50 border border-amber-200">
+        <svg class="w-5 h-5 text-amber-500 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M3 12a9 9 0 1118 0 9 9 0 01-18 0z"/></svg>
+        <div>
+          <p class="text-sm font-medium text-amber-800">KNN Classification: ${Math.round(product.probability * 100)}% confidence</p>
+          <p class="text-xs text-amber-600 mt-1">This item was categorised as <strong>${category.name}</strong> by our model but the prediction isn't fully certain. If this looks wrong, you can
+            <button onclick="openReportModal('${product.id}')" class="underline font-medium hover:text-amber-800 transition">report the correct category</button>.
+          </p>
+        </div>
+      </div>
+      ` : ''}
+
       <div>
-        <label class="block text-xs font-medium mb-2 tracking-wide uppercase text-stone-500">Colour</label>
+        <label class="block text-xs font-medium mb-2 tracking-wide uppercase text-noir-500">Colour</label>
         <div class="flex flex-wrap gap-2">
           ${product.colors.map((color, i) => `
             <button onclick="selectColor(this)"
-              class="px-4 py-2 border ${i === 0 ? 'border-stone-900 bg-stone-50' : 'border-stone-200'} rounded-lg text-sm hover:border-stone-900 transition">
+              class="px-4 py-2 border ${i === 0 ? 'border-noir-900 bg-brand-50' : 'border-brand-200'} rounded-lg text-sm hover:border-noir-900 transition">
               ${color}
             </button>
           `).join('')}
@@ -787,11 +1306,17 @@ function renderProductDetail(product) {
       </div>
 
       <div>
-        <label class="block text-xs font-medium mb-2 tracking-wide uppercase text-stone-500">Size</label>
+        <div class="flex items-center justify-between mb-2">
+          <label class="block text-xs font-medium tracking-wide uppercase text-noir-500">Size</label>
+          <button onclick="openSizeGuide(${product.category})" class="text-xs text-brand-600 hover:text-brand-700 font-medium flex items-center gap-1 transition">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 7h6m0 10v-3m-3 3h.01M9 17h.01M9 14h.01M12 14h.01M15 11h.01M12 11h.01M9 11h.01M7 21h10a2 2 0 002-2V5a2 2 0 00-2-2H7a2 2 0 00-2 2v14a2 2 0 002 2z"/></svg>
+            Size Guide
+          </button>
+        </div>
         <div class="flex flex-wrap gap-2">
           ${product.sizes.map((size, i) => `
             <button onclick="selectSize(this)"
-              class="w-12 h-12 border ${i === 0 ? 'border-stone-900 bg-stone-50' : 'border-stone-200'} rounded-lg text-sm hover:border-stone-900 transition">
+              class="w-12 h-12 border ${i === 0 ? 'border-noir-900 bg-brand-50' : 'border-brand-200'} rounded-lg text-sm hover:border-noir-900 transition">
               ${size}
             </button>
           `).join('')}
@@ -800,15 +1325,15 @@ function renderProductDetail(product) {
 
       <div class="flex gap-3">
         <button onclick="addToCart('${product.id}')"
-          class="flex-1 bg-stone-900 text-white py-4 rounded-xl font-medium text-sm hover:bg-stone-800 transition tracking-wide">
+          class="flex-1 bg-noir-900 text-white py-4 rounded-xl font-medium text-sm hover:bg-noir-800 transition tracking-wide">
           Add to Cart
         </button>
         <button onclick="buyNow('${product.id}')"
-          class="flex-1 border border-stone-900 py-4 rounded-xl font-medium text-sm hover:bg-stone-50 transition tracking-wide">
+          class="flex-1 border border-noir-900 py-4 rounded-xl font-medium text-sm hover:bg-brand-50 transition tracking-wide">
           Buy Now
         </button>
         <button onclick="toggleWishlist('${product.id}')"
-          class="w-14 h-14 border ${isWishlisted ? 'border-red-400 text-red-500' : 'border-stone-200 text-stone-400'} rounded-xl flex items-center justify-center hover:border-stone-900 transition">
+          class="w-14 h-14 border ${isWishlisted ? 'border-brand-500 text-brand-600' : 'border-brand-200 text-noir-400'} rounded-xl flex items-center justify-center hover:border-noir-900 transition">
           <svg class="w-6 h-6" fill="${isWishlisted ? 'currentColor' : 'none'}" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
               d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z"/>
@@ -816,14 +1341,14 @@ function renderProductDetail(product) {
         </button>
       </div>
 
-      <div class="border-t border-stone-100 pt-5 space-y-3">
-        <div class="flex items-center gap-3 text-sm text-stone-500">
+      <div class="border-t border-brand-100 pt-5 space-y-3">
+        <div class="flex items-center gap-3 text-sm text-noir-500">
           <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4"/>
           </svg>
           Free shipping on orders over £100
         </div>
-        <div class="flex items-center gap-3 text-sm text-stone-500">
+        <div class="flex items-center gap-3 text-sm text-noir-500">
           <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
           </svg>
@@ -834,42 +1359,117 @@ function renderProductDetail(product) {
   `;
 }
 
+// Infinite-scroll state for recommendation rows
+let similarPool = [];
+let similarLoaded = 0;
+let ymalPool = [];
+let ymalLoaded = 0;
+const SCROLL_BATCH = 8;
+
+function loadMoreSimilar(rowEl) {
+  const next = similarPool.slice(similarLoaded, similarLoaded + SCROLL_BATCH);
+  if (next.length === 0) return;
+  next.forEach(p => rowEl.insertAdjacentHTML('beforeend', createProductCard(p, true)));
+  similarLoaded += next.length;
+}
+
+function loadMoreYMAL(rowEl) {
+  const next = ymalPool.slice(ymalLoaded, ymalLoaded + SCROLL_BATCH);
+  if (next.length === 0) return;
+  next.forEach(p => rowEl.insertAdjacentHTML('beforeend', createProductCard(p, true)));
+  ymalLoaded += next.length;
+}
+
 function renderRecommendations(product) {
   const container = document.getElementById('recommendations');
 
-  // Row 1: Similar Items (same category, excluding current)
-  const similarItems = products
+  // Row 1 (infinite scroll): KNN-predicted + training-set items from the same category
+  const knnSimilar = predictedProducts
+    .filter(p => p.category === product.category)
+    .sort(() => Math.random() - 0.5);
+  const trainingSimilar = products
     .filter(p => p.category === product.category && p.id !== product.id)
-    .slice(0, 4);
+    .sort(() => Math.random() - 0.5);
+  similarPool = [...knnSimilar, ...trainingSimilar];
+  similarLoaded = 0;
 
-  // Row 2: Frequently Bought Together (as a grid), or cross-category picks if no FBT
-  const fbtIds = frequentlyBoughtTogether[product.id] || [];
-  const fbtProducts = fbtIds.map(id => products.find(p => p.id === id)).filter(Boolean);
-  const youMayAlsoLike = fbtProducts.length >= 2
-    ? fbtProducts
-    : products.filter(p => p.id !== product.id && p.category !== product.category)
-        .sort(() => Math.random() - 0.5)
-        .slice(0, 4);
+  // Row 2: Frequently Bought Together — bundle from different categories
+  const usedCats = new Set([product.category]);
+  const bundleItems = [product];
+  const shuffled = allProducts.filter(p => p.id !== product.id).sort(() => Math.random() - 0.5);
+  for (const p of shuffled) {
+    if (!usedCats.has(p.category)) {
+      bundleItems.push(p);
+      usedCats.add(p.category);
+      if (bundleItems.length >= 3) break;
+    }
+  }
+  const bundlePrice = bundleItems.reduce((s, p) => s + p.price, 0);
+
+  // Row 3 (infinite scroll): You May Also Like — completely random from all products
+  ymalPool = allProducts
+    .filter(p => p.id !== product.id)
+    .sort(() => Math.random() - 0.5);
+  ymalLoaded = 0;
 
   container.innerHTML = `
-    ${similarItems.length > 0 ? `
+    ${similarPool.length > 0 ? `
       <div>
-        <h3 class="font-display text-xl mb-6">Similar Items</h3>
-        <div class="grid grid-cols-2 md:grid-cols-4 gap-5">
-          ${similarItems.map(p => createProductCard(p)).join('')}
+        <h3 class="font-display text-xl mb-2">Similar Items</h3>
+        <p class="text-xs text-noir-400 mb-4">Training + KNN-predicted items in the same category</p>
+        <div id="similarRow" class="scroll-row"></div>
+      </div>
+    ` : ''}
+
+    ${bundleItems.length > 1 ? `
+      <div>
+        <h3 class="font-display text-xl mb-6">Frequently Bought Together</h3>
+        <div class="flex items-center gap-4 flex-wrap">
+          ${bundleItems.map((p, i) => `
+            ${i > 0 ? '<span class="text-2xl text-noir-300 font-light">+</span>' : ''}
+            <div class="w-44 flex-shrink-0 cursor-pointer" onclick="showProductDetail('${p.id}')">
+              <div class="aspect-square rounded-2xl overflow-hidden bg-brand-100 mb-2">
+                <img src="${getImageUrl(p)}" loading="lazy" class="w-full h-full object-contain" alt="${p.name}">
+              </div>
+              <p class="text-sm font-medium truncate">${p.name}</p>
+              <p class="text-sm text-noir-600">£${p.price}</p>
+            </div>
+          `).join('')}
+          <div class="ml-auto pl-6 border-l border-brand-200 flex flex-col items-center justify-center gap-3 min-w-[140px]">
+            <p class="text-sm text-noir-500">Bundle Price</p>
+            <p class="text-3xl font-bold">£${bundlePrice}</p>
+            <button onclick="${bundleItems.map(p => `addToCart('${p.id}')`).join('; ')}" class="bg-noir-900 text-white px-6 py-3 rounded-xl text-sm font-medium hover:bg-noir-800 transition">Add All to Cart</button>
+          </div>
         </div>
       </div>
     ` : ''}
 
-    ${youMayAlsoLike.length > 0 ? `
-      <div>
-        <h3 class="font-display text-xl mb-6">You May Also Like</h3>
-        <div class="grid grid-cols-2 md:grid-cols-4 gap-5">
-          ${youMayAlsoLike.map(p => createProductCard(p)).join('')}
-        </div>
-      </div>
-    ` : ''}
+    <div>
+      <h3 class="font-display text-xl mb-2">You May Also Like</h3>
+      <p class="text-xs text-noir-400 mb-4">Discover something new</p>
+      <div id="ymalRow" class="scroll-row"></div>
+    </div>
   `;
+
+  // Wire up infinite scroll
+  const similarRow = document.getElementById('similarRow');
+  const ymalRow = document.getElementById('ymalRow');
+  if (similarRow) {
+    loadMoreSimilar(similarRow);
+    similarRow.addEventListener('scroll', () => {
+      if (similarRow.scrollLeft + similarRow.clientWidth >= similarRow.scrollWidth - 100) {
+        loadMoreSimilar(similarRow);
+      }
+    });
+  }
+  if (ymalRow) {
+    loadMoreYMAL(ymalRow);
+    ymalRow.addEventListener('scroll', () => {
+      if (ymalRow.scrollLeft + ymalRow.clientWidth >= ymalRow.scrollWidth - 100) {
+        loadMoreYMAL(ymalRow);
+      }
+    });
+  }
 }
 
 function renderCart() {
@@ -880,9 +1480,9 @@ function renderCart() {
     itemsContainer.innerHTML = `
       <div class="text-center py-16">
         <div class="text-6xl mb-5">🛒</div>
-        <p class="text-stone-400 mb-6 text-lg">Your cart is empty</p>
+        <p class="text-noir-400 mb-6 text-lg">Your cart is empty</p>
         <button onclick="showAllProducts()"
-          class="bg-stone-900 text-white px-8 py-3 rounded-xl text-sm font-medium hover:bg-stone-800 transition">
+          class="bg-noir-900 text-white px-8 py-3 rounded-xl text-sm font-medium hover:bg-noir-800 transition">
           Continue Shopping
         </button>
       </div>
@@ -892,25 +1492,25 @@ function renderCart() {
   }
 
   itemsContainer.innerHTML = cart.map(item => {
-    const product = products.find(p => p.id === item.product_id);
+    const product = findProduct(item.product_id);
     if (!product) return '';
     const imageUrl = getImageUrl(product);
     return `
       <div class="bg-white p-4 rounded-2xl flex gap-4 card-shadow">
-        <img src="${imageUrl}" class="w-24 h-24 rounded-xl flex-shrink-0 object-contain bg-stone-100" alt="${product.name}">
+        <img src="${imageUrl}" class="w-24 h-24 rounded-xl flex-shrink-0 object-contain bg-brand-100" alt="${product.name}">
         <div class="flex-1">
           <h3 class="font-medium mb-0.5">${product.name}</h3>
-          <p class="text-sm text-stone-400 mb-3">£${product.price} each</p>
+          <p class="text-sm text-noir-400 mb-3">£${product.price} each</p>
           <div class="flex items-center gap-2">
             <button onclick="updateQuantity('${item.__backendId}', ${item.quantity - 1})"
-              class="w-8 h-8 border border-stone-200 rounded-lg flex items-center justify-center hover:bg-stone-100 transition text-stone-600">−</button>
+              class="w-8 h-8 border border-brand-200 rounded-lg flex items-center justify-center hover:bg-brand-100 transition text-noir-600">−</button>
             <span class="w-8 text-center font-medium">${item.quantity}</span>
             <button onclick="updateQuantity('${item.__backendId}', ${item.quantity + 1})"
-              class="w-8 h-8 border border-stone-200 rounded-lg flex items-center justify-center hover:bg-stone-100 transition text-stone-600">+</button>
+              class="w-8 h-8 border border-brand-200 rounded-lg flex items-center justify-center hover:bg-brand-100 transition text-noir-600">+</button>
           </div>
         </div>
         <div class="flex flex-col items-end justify-between">
-          <button onclick="removeFromCart('${item.__backendId}')" class="text-stone-300 hover:text-stone-600 transition">
+          <button onclick="removeFromCart('${item.__backendId}')" class="text-noir-300 hover:text-brand-600 transition">
             <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M6 18L18 6M6 6l12 12"/>
             </svg>
@@ -922,7 +1522,7 @@ function renderCart() {
   }).join('');
 
   const subtotal = cart.reduce((sum, item) => {
-    const product = products.find(p => p.id === item.product_id);
+    const product = findProduct(item.product_id);
     return sum + (product ? product.price * item.quantity : 0);
   }, 0);
   const shipping = subtotal >= 100 ? 0 : 9.99;
@@ -930,21 +1530,21 @@ function renderCart() {
 
   summaryContainer.innerHTML = `
     <div class="space-y-3 mb-6">
-      <div class="flex justify-between text-stone-500">
+      <div class="flex justify-between text-noir-500">
         <span>Subtotal</span><span>£${subtotal.toFixed(2)}</span>
       </div>
-      <div class="flex justify-between text-stone-500">
+      <div class="flex justify-between text-noir-500">
         <span>Shipping</span><span>${shipping === 0 ? 'Free' : '£' + shipping.toFixed(2)}</span>
       </div>
-      <div class="flex justify-between text-lg font-semibold pt-3 border-t border-stone-200">
+      <div class="flex justify-between text-lg font-semibold pt-3 border-t border-brand-200">
         <span>Total</span><span>£${total.toFixed(2)}</span>
       </div>
     </div>
     <button onclick="checkout()"
-      class="w-full bg-stone-900 text-white py-4 rounded-xl font-medium text-sm tracking-widest hover:bg-stone-800 transition">
+      class="w-full bg-noir-900 text-white py-4 rounded-xl font-medium text-sm tracking-widest hover:bg-noir-800 transition">
       CHECKOUT
     </button>
-    <p class="text-xs text-stone-400 text-center mt-4">Free shipping on orders over £100</p>
+    <p class="text-xs text-noir-400 text-center mt-4">Free shipping on orders over £100</p>
   `;
 }
 
@@ -955,9 +1555,9 @@ function renderWishlist() {
     container.innerHTML = `
       <div class="col-span-full text-center py-16">
         <div class="text-6xl mb-5">💝</div>
-        <p class="text-stone-400 mb-6 text-lg">Your wishlist is empty</p>
+        <p class="text-noir-400 mb-6 text-lg">Your wishlist is empty</p>
         <button onclick="showAllProducts()"
-          class="bg-stone-900 text-white px-8 py-3 rounded-xl text-sm font-medium hover:bg-stone-800 transition">
+          class="bg-noir-900 text-white px-8 py-3 rounded-xl text-sm font-medium hover:bg-noir-800 transition">
           Explore Products
         </button>
       </div>
@@ -966,7 +1566,7 @@ function renderWishlist() {
   }
 
   container.innerHTML = wishlist.map(item => {
-    const product = products.find(p => p.id === item.product_id);
+    const product = findProduct(item.product_id);
     if (!product) return '';
     return createProductCard(product);
   }).join('');
@@ -1063,7 +1663,7 @@ function checkout() {
   if (cart.length === 0) { showToast('Your cart is empty'); return; }
 
   const subtotal = cart.reduce((sum, item) => {
-    const p = products.find(p => p.id === item.product_id);
+    const p = findProduct(item.product_id);
     return sum + (p ? p.price * item.quantity : 0);
   }, 0);
   const shipping = subtotal >= 100 ? 0 : 9.99;
@@ -1090,7 +1690,7 @@ function closePaymentModalOutside(e) {
 
 function processPayment() {
   const subtotal = cart.reduce((sum, item) => {
-    const p = products.find(p => p.id === item.product_id);
+    const p = findProduct(item.product_id);
     return sum + (p ? p.price * item.quantity : 0);
   }, 0);
   const total = subtotal + (subtotal >= 100 ? 0 : 9.99);
@@ -1104,7 +1704,7 @@ function processPayment() {
   document.getElementById('confirmationView').classList.remove('hidden');
   document.getElementById('confirmationTotal').textContent = '£' + total.toFixed(2);
   currentView = 'confirmation';
-  window.scrollTo({ top: 0, behavior: 'smooth' });
+  document.getElementById('app').scrollTo({ top: 0, behavior: 'instant' });
 }
 
 function formatCardNumber(input) {
@@ -1135,20 +1735,20 @@ function sortProducts() {
 
 function selectColor(btn) {
   btn.parentElement.querySelectorAll('button').forEach(b => {
-    b.classList.remove('border-stone-900', 'bg-stone-50');
-    b.classList.add('border-stone-200');
+    b.classList.remove('border-noir-900', 'bg-brand-50');
+    b.classList.add('border-brand-200');
   });
-  btn.classList.remove('border-stone-200');
-  btn.classList.add('border-stone-900', 'bg-stone-50');
+  btn.classList.remove('border-brand-200');
+  btn.classList.add('border-noir-900', 'bg-brand-50');
 }
 
 function selectSize(btn) {
   btn.parentElement.querySelectorAll('button').forEach(b => {
-    b.classList.remove('border-stone-900', 'bg-stone-50');
-    b.classList.add('border-stone-200');
+    b.classList.remove('border-noir-900', 'bg-brand-50');
+    b.classList.add('border-brand-200');
   });
-  btn.classList.remove('border-stone-200');
-  btn.classList.add('border-stone-900', 'bg-stone-50');
+  btn.classList.remove('border-brand-200');
+  btn.classList.add('border-noir-900', 'bg-brand-50');
 }
 
 // ===== UI HELPERS =====
@@ -1186,6 +1786,242 @@ function showToast(message) {
   setTimeout(() => toast.classList.add('translate-y-20', 'opacity-0'), 2500);
 }
 
+// ===== FITTING ROOM =====
+function showFittingRoom() {
+  previousView = currentView;
+  hideAllViews();
+  document.getElementById('fittingRoomView').classList.remove('hidden');
+  currentView = 'fittingRoom';
+  renderFittingRoom();
+  document.getElementById('app').scrollTo({ top: 0, behavior: 'instant' });
+}
+
+function renderFittingRoom() {
+  // Get unique products from cart
+  const cartProducts = [];
+  const seenIds = new Set();
+  for (const item of cart) {
+    if (!seenIds.has(item.product_id)) {
+      const product = findProduct(item.product_id);
+      if (product) {
+        cartProducts.push(product);
+        seenIds.add(item.product_id);
+      }
+    }
+  }
+  
+  const emptyEl = document.getElementById('fittingRoomEmpty');
+  const itemsEl = document.getElementById('fittingRoomItems');
+  
+  if (cartProducts.length === 0) {
+    emptyEl.classList.remove('hidden');
+    itemsEl.classList.add('hidden');
+  } else {
+    emptyEl.classList.add('hidden');
+    itemsEl.classList.remove('hidden');
+  }
+  
+  // Group products by fitting room type
+  const grouped = { top: [], bottom: [], shoe: [], accessory: [], dress: [], outerwear: [] };
+  for (const p of cartProducts) {
+    const type = p.fittingRoomType || 'accessory';
+    if (grouped[type]) grouped[type].push(p);
+  }
+  
+  // Render each section
+  renderFittingRoomSection('fr-tops', 'fr-tops-section', grouped.top, 'top');
+  renderFittingRoomSection('fr-bottoms', 'fr-bottoms-section', grouped.bottom, 'bottom');
+  renderFittingRoomSection('fr-shoes', 'fr-shoes-section', grouped.shoe, 'shoe');
+  renderFittingRoomSection('fr-accessories', 'fr-accessories-section', grouped.accessory, 'accessory');
+  renderFittingRoomSection('fr-dress', 'fr-dress-section', grouped.dress, 'dress');
+  renderFittingRoomSection('fr-outerwear', 'fr-outerwear-section', grouped.outerwear, 'outerwear');
+  
+  updateFittingRoomAvatar();
+  renderSavedOutfits();
+}
+
+function renderFittingRoomSection(gridId, sectionId, items, slotType) {
+  const grid = document.getElementById(gridId);
+  const section = document.getElementById(sectionId);
+  
+  if (!items || items.length === 0) {
+    section.classList.add('hidden');
+    return;
+  }
+  section.classList.remove('hidden');
+  
+  grid.innerHTML = items.map(p => {
+    const isSelected = fittingRoomOutfit[slotType]?.id === p.id;
+    const imageUrl = getImageUrl(p);
+    return `
+      <button onclick="toggleFittingRoomItem('${slotType}', '${p.id}')"
+        class="p-3 rounded-xl border-2 transition text-center ${isSelected ? 'border-amber-500 bg-amber-50 ring-2 ring-amber-500' : 'border-brand-200 bg-white hover:border-noir-400'}">
+        <div class="aspect-square rounded-lg overflow-hidden bg-brand-100 mb-2">
+          <img src="${imageUrl}" alt="${p.name}" class="w-full h-full object-contain">
+        </div>
+        <div class="text-xs font-semibold truncate">${p.name}</div>
+        <div class="text-xs text-amber-600 font-bold">\u00a3${p.price}</div>
+      </button>
+    `;
+  }).join('');
+}
+
+function toggleFittingRoomItem(slotType, productId) {
+  const product = findProduct(productId);
+  if (!product) return;
+  
+  // Toggle: clicking same item deselects it
+  if (fittingRoomOutfit[slotType]?.id === productId) {
+    fittingRoomOutfit[slotType] = null;
+  } else {
+    fittingRoomOutfit[slotType] = product;
+    
+    // If selecting a dress, clear top and bottom
+    if (slotType === 'dress') {
+      fittingRoomOutfit.top = null;
+      fittingRoomOutfit.bottom = null;
+    }
+    // If selecting top or bottom, clear dress
+    if (slotType === 'top' || slotType === 'bottom') {
+      fittingRoomOutfit.dress = null;
+    }
+  }
+  
+  renderFittingRoom();
+}
+
+function updateFittingRoomAvatar() {
+  const { top, bottom, shoe, accessory, dress, outerwear } = fittingRoomOutfit;
+
+  function setOverlay(key, product) {
+    const wrap = document.getElementById('overlay-' + key);
+    const img  = document.getElementById('overlay-' + key + '-img');
+    if (!wrap || !img) return;
+    if (product) {
+      img.src = getImageUrl(product);
+      img.alt = product.name;
+      wrap.classList.remove('hidden');
+    } else {
+      wrap.classList.add('hidden');
+    }
+  }
+
+  setOverlay('outerwear', outerwear);
+
+  if (dress) {
+    document.getElementById('overlay-top').classList.add('hidden');
+    document.getElementById('overlay-bottom').classList.add('hidden');
+    setOverlay('dress', dress);
+  } else {
+    document.getElementById('overlay-dress').classList.add('hidden');
+    setOverlay('top', top);
+    setOverlay('bottom', bottom);
+  }
+
+  // Shoes: same product image on both feet (right shoe mirrored via CSS)
+  const shoeWrapL = document.getElementById('overlay-shoe-left');
+  const shoeImgL  = document.getElementById('overlay-shoe-left-img');
+  const shoeWrapR = document.getElementById('overlay-shoe-right');
+  const shoeImgR  = document.getElementById('overlay-shoe-right-img');
+  if (shoe) {
+    shoeImgL.src = getImageUrl(shoe);
+    shoeImgR.src = getImageUrl(shoe);
+    shoeWrapL.classList.remove('hidden');
+    shoeWrapR.classList.remove('hidden');
+  } else {
+    shoeWrapL.classList.add('hidden');
+    shoeWrapR.classList.add('hidden');
+  }
+
+  setOverlay('accessory', accessory);
+
+  const labelsEl = document.getElementById('outfitLabels');
+  const totalEl  = document.getElementById('outfitTotal');
+  const selectedItems = [top, bottom, shoe, accessory, dress, outerwear].filter(Boolean);
+  if (selectedItems.length === 0) {
+    labelsEl.innerHTML = '<p class="text-noir-400 italic">Select items to build your outfit</p>';
+  } else {
+    labelsEl.innerHTML = `<p class="text-noir-600">${selectedItems.length} item${selectedItems.length !== 1 ? 's' : ''} selected</p>`;
+  }
+  const total = selectedItems.reduce((sum, item) => sum + item.price, 0);
+  totalEl.textContent = `Total: \u00a3${total}`;
+}
+
+function clearFittingRoom() {
+  fittingRoomOutfit = { top: null, bottom: null, shoe: null, accessory: null, dress: null, outerwear: null };
+  renderFittingRoom();
+  showToast('Outfit cleared');
+}
+
+function saveFittingRoomOutfit() {
+  const selectedItems = Object.values(fittingRoomOutfit).filter(Boolean);
+  if (selectedItems.length === 0) {
+    showToast('Please select items first');
+    return;
+  }
+  
+  const outfitName = prompt('Enter a name for this outfit:');
+  if (!outfitName || !outfitName.trim()) return;
+  
+  const newOutfit = {
+    id: 'outfit_' + Date.now(),
+    name: outfitName.trim(),
+    items: { ...fittingRoomOutfit },
+    total: selectedItems.reduce((sum, item) => sum + item.price, 0)
+  };
+  
+  savedOutfits.push(newOutfit);
+  saveSavedOutfits();
+  renderSavedOutfits();
+  showToast(`Saved outfit: ${outfitName.trim()}`);
+}
+
+function renderSavedOutfits() {
+  const grid = document.getElementById('savedOutfitsGrid');
+  const noOutfits = document.getElementById('noSavedOutfits');
+  
+  if (savedOutfits.length === 0) {
+    grid.innerHTML = '';
+    noOutfits.classList.remove('hidden');
+    return;
+  }
+  
+  noOutfits.classList.add('hidden');
+  grid.innerHTML = savedOutfits.map(outfit => {
+    const items = Object.values(outfit.items).filter(Boolean);
+    const thumbs = items.slice(0, 4).map(i =>
+      `<img src="${getImageUrl(i)}" alt="${i.name}" class="w-9 h-9 object-contain rounded bg-brand-100">`
+    ).join('');
+    return `
+      <div class="p-4 rounded-xl border-2 border-amber-200 bg-amber-50/50 text-center">
+        <p class="text-sm font-bold mb-2 truncate">${outfit.name}</p>
+        <div class="flex justify-center gap-1 flex-wrap mb-2 min-h-[2.5rem]">${thumbs || '<span class="text-noir-300 text-2xl">\ud83d\udc57</span>'}</div>
+        <p class="text-xs text-amber-600 font-semibold mb-3">\u00a3${outfit.total}</p>
+        <div class="flex gap-2 justify-center">
+          <button onclick="loadSavedOutfit('${outfit.id}')" class="text-xs px-3 py-1.5 bg-noir-900 text-white rounded-lg hover:bg-noir-700 transition">Load</button>
+          <button onclick="deleteSavedOutfit('${outfit.id}')" class="text-xs px-3 py-1.5 bg-red-500 text-white rounded-lg hover:bg-red-600 transition">\ud83d\uddd1\ufe0f</button>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+function loadSavedOutfit(outfitId) {
+  const outfit = savedOutfits.find(o => o.id === outfitId);
+  if (!outfit) return;
+  
+  fittingRoomOutfit = { ...outfit.items };
+  renderFittingRoom();
+  showToast('Outfit loaded!');
+}
+
+function deleteSavedOutfit(outfitId) {
+  savedOutfits = savedOutfits.filter(o => o.id !== outfitId);
+  saveSavedOutfits();
+  renderSavedOutfits();
+  showToast('Outfit deleted');
+}
+
 // ===== INIT =====
 loadStorage();
 renderCategories();
@@ -1195,12 +2031,15 @@ updateWishlistBadge();
 
 // Infinite scroll listener
 document.getElementById('app').addEventListener('scroll', function() {
-  if (currentView !== 'products') return;
   const scrollTop = this.scrollTop;
   const scrollHeight = this.scrollHeight;
   const clientHeight = this.clientHeight;
   if (scrollTop + clientHeight >= scrollHeight - 300) {
-    loadMoreProducts();
+    if (currentView === 'products') {
+      loadMoreProducts();
+    } else if (currentView === 'home') {
+      loadMoreHomeFeed();
+    }
   }
 });
 </script>
@@ -1211,7 +2050,8 @@ document.getElementById('app').addEventListener('scroll', function() {
 # Inject product data
 HTML_CONTENT = HTML_CONTENT_TEMPLATE \
     .replace('__PRODUCTS_JSON__', products_json) \
-    .replace('__FBT_JSON__', fbt_json)
+    .replace('__FBT_JSON__', fbt_json) \
+    .replace('__PREDICTED_JSON__', predicted_products_json)
 
 # ================================
 # DASH LAYOUT
